@@ -26,10 +26,13 @@ SORT_ASCENDING = {
 
 def build_dataframe(records: list) -> pd.DataFrame:
     df = pd.DataFrame(records)
-    # dividend_yield and return_on_equity come back from yfinance as fractions (0.03 = 3%)
+    # dividend_yield and return_on_equity come back from yfinance as fractions (0.03 = 3%).
+    # Missing values arrive as Python None (e.g. ETFs/gilts have no dividend_yield field),
+    # which keeps a column as object dtype rather than float -- pd.to_numeric coerces
+    # None -> NaN so later arithmetic/rounding doesn't choke on a raw None.
     for pct_col in ["dividend_yield", "return_on_equity", "profit_margin"]:
         if pct_col in df.columns:
-            df[pct_col + "_pct"] = df[pct_col] * 100
+            df[pct_col + "_pct"] = pd.to_numeric(df[pct_col], errors="coerce") * 100
     return df
 
 
@@ -74,7 +77,11 @@ def format_for_display(df: pd.DataFrame) -> pd.DataFrame:
 
     for col in ["P/E", "Fwd P/E", "P/B", "Div Yield %", "ROE %", "D/E"]:
         if col in display_df.columns:
-            display_df[col] = display_df[col].round(2)
+            # to_numeric first: a column that's a mix of floats and Python None (rather
+            # than NaN) stays object dtype, and .round() on an object Series calls
+            # round() on each raw value -- which throws on None. Coercing to numeric
+            # turns None into NaN, which .round() handles fine.
+            display_df[col] = pd.to_numeric(display_df[col], errors="coerce").round(2)
     if "Market Cap" in display_df.columns:
         display_df["Market Cap"] = display_df["Market Cap"].apply(
             lambda x: f"£{x/1e9:.1f}B" if pd.notna(x) and x >= 1e9
