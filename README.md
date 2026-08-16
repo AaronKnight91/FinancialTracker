@@ -61,6 +61,7 @@ python main.py --refresh              # ignore cache, force fresh fetch
 python main.py --screen --max-pe 15 --min-div-yield 3
 python main.py --asset-class company --graham
 python main.py --asset-class company --graham --graham-only
+python main.py --discover              # scan the whole FTSE 100+250 for Graham passers
 ```
 
 Every run prints a comparison table and saves a full CSV snapshot to
@@ -103,6 +104,49 @@ Graham results are also written back into `data/market_data.db` alongside
 each snapshot, so pass/fail is tracked historically across scheduled runs,
 not just shown for the current run.
 
+## Finding Graham passers without a pre-set watchlist (`--discover`)
+
+`--discover` scans the whole FTSE 100 + FTSE 250 (~350 companies) for Graham
+passers, instead of relying on `watchlist.json`:
+
+```bash
+python main.py --discover                        # full FTSE 100+250 scan, shows only passers
+python main.py --discover --discover-show-all     # show every company scanned, not just passers
+python main.py --discover --discover-limit 30     # quick test run on the first 30 companies
+python main.py --discover --discover-ftse100-only # FTSE 100 only (faster, ~100 companies)
+python main.py --discover --discover-refresh-universe  # force re-fetch the constituent list
+```
+
+**Where the ticker list comes from:** yfinance has no "list every LSE ticker"
+endpoint, so `--discover` needs a separate source just to know what to scan.
+By default it scrapes the FTSE 100 and FTSE 250 constituent tables from
+Wikipedia (free, no API key) and caches the result locally for 30 days
+(`data/universe_cache.json`) — Wikipedia is only hit once a month, not every
+run. If you have an `FMP_API_KEY` set, `--discover-source fmp` uses Financial
+Modeling Prep's stock screener instead, which can cover more of the LSE than
+just the FTSE 350.
+
+**Why there's a pre-filter:** the full Graham check needs 3 extra API calls
+per company (balance sheet, income statement, dividend history) on top of
+the 2 already needed for basic fundamentals. Run that on 350 companies and
+it adds up. So `--discover` first filters on P/E ≤ 20 and P/B ≤ 2.5 (using
+data already fetched for the ratio table) and only runs the full, slower
+Graham check on survivors. Companies excluded this way show up as
+`excluded by pre-filter` rather than a real fail — widen the thresholds with
+`--prefilter-max-pe` / `--prefilter-max-pb` (or set them very high) if you'd
+rather run the full check on everything.
+
+**A first full run will be slow** — expect several minutes for the FTSE 350,
+mostly the fundamentals pass. Cached results (24h TTL by default) make
+repeat runs the same day much faster. This is well suited to the monthly
+cron setup below: let it run overnight once a month rather than interactively.
+
+**Ticker conversion caveat:** LSE tickers are converted to Yahoo's format
+with a simple rule (e.g. `BT.A` → `BT-A.L`), which covers the vast majority
+of cases but isn't a verified lookup table. A handful of tickers may not
+resolve correctly; these will just show up as "no data returned" rather than
+break the run.
+
 ## Project structure
 
 ```
@@ -114,7 +158,8 @@ lse_analyzer/
 ├── data/
 │   ├── cache.py             # short-term TTL cache (avoids re-hitting APIs same-day)
 │   ├── storage.py           # long-term SQLite store: price history + dated snapshots
-│   └── fetchers.py          # yfinance + FMP fallback fetching, cache-aware
+│   ├── fetchers.py          # yfinance + FMP fallback fetching, cache-aware
+│   └── universe.py          # discovers LSE tickers to scan for --discover (Wikipedia/FMP)
 ├── analysis/
 │   ├── ratios.py              # ratio calcs, screening, sorting, trailing returns
 │   └── graham.py              # Benjamin Graham defensive-investor screen (--graham)

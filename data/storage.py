@@ -98,6 +98,7 @@ def save_snapshot(record: dict) -> None:
 def save_graham_result(ticker: str, run_date: str, graham_score: str, passes_graham) -> None:
     """Updates the existing snapshot row for (ticker, run_date) with Graham
     screen results, so pass/fail is tracked historically alongside the ratios."""
+    init_db()
     with _connect() as conn:
         conn.execute(
             "UPDATE snapshots SET graham_score = ?, passes_graham = ? WHERE ticker = ? AND run_date = ?",

@@ -12,15 +12,19 @@ Usage:
     python main.py --history
     python main.py --graham
     python main.py --asset-class company --graham --graham-only
+    python main.py --discover                      # scan the FTSE 100+250 for Graham passers
+    python main.py --discover --discover-limit 30   # quick test run on a subset
 """
 import argparse
 import json
 from datetime import datetime
 
+import pandas as pd
 from tabulate import tabulate
 
 from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS
 from data.fetchers import get_watchlist_fundamentals
+import data.universe as universe
 from analysis.ratios import build_dataframe, sort_dataframe, format_for_display, screen, with_trailing_returns
 from analysis.graham import graham_screen, CRITERIA_LABELS, DEFAULT_MIN_MARKET_CAP
 
@@ -54,6 +58,22 @@ def parse_args():
                          help="With --graham, show only companies that pass every evaluable Graham criterion")
     parser.add_argument("--graham-min-market-cap", type=float, default=None,
                          help="Override the 'adequate size' market cap floor used by --graham (default £100M)")
+    parser.add_argument("--discover", action="store_true",
+                         help="Scan the whole FTSE 100+250 universe for Graham passers, instead of a fixed watchlist")
+    parser.add_argument("--discover-source", choices=["wikipedia", "fmp"], default="wikipedia",
+                         help="Where to source the universe of tickers to scan (fmp requires FMP_API_KEY, falls back to wikipedia)")
+    parser.add_argument("--discover-ftse100-only", action="store_true",
+                         help="With --discover, scan only the FTSE 100 (faster) instead of FTSE 100+250")
+    parser.add_argument("--discover-limit", type=int, default=None,
+                         help="With --discover, cap the number of companies scanned (useful for a quick test run)")
+    parser.add_argument("--discover-refresh-universe", action="store_true",
+                         help="Force re-fetching the ticker universe instead of using the local cache (~30 day TTL)")
+    parser.add_argument("--discover-show-all", action="store_true",
+                         help="With --discover, show every company scanned, not just those that pass Graham's criteria")
+    parser.add_argument("--prefilter-max-pe", type=float, default=20.0,
+                         help="With --discover, only run full (slow) Graham checks on companies at or below this P/E first (default 20)")
+    parser.add_argument("--prefilter-max-pb", type=float, default=2.5,
+                         help="With --discover, only run full (slow) Graham checks on companies at or below this P/B first (default 2.5)")
     parser.add_argument("--no-save", action="store_true", help="Don't write a CSV snapshot to output/")
     return parser.parse_args()
 
@@ -61,7 +81,19 @@ def parse_args():
 def main():
     args = parse_args()
 
-    if args.all:
+    if args.discover:
+        print(f"Discovering LSE company universe (source={args.discover_source})...")
+        tickers = universe.get_universe(
+            source=args.discover_source,
+            include_250=not args.discover_ftse100_only,
+            limit=args.discover_limit,
+            force_refresh=args.discover_refresh_universe,
+        )
+        print(f"Universe: {len(tickers)} companies to scan. This fetches fresh data per "
+              f"company, so a full FTSE 350 run can take a while on first run -- results "
+              f"are cached for next time.\n")
+        args.graham = True  # the whole point of --discover is finding Graham passers
+    elif args.all:
         tickers = ALL_INSTRUMENTS
     elif args.asset_class:
         tickers = ASSET_CLASSES[args.asset_class]
@@ -72,6 +104,10 @@ def main():
     records = get_watchlist_fundamentals(tickers, use_cache=not args.refresh)
 
     df = build_dataframe(records)
+    if args.discover:
+        # Discovered tickers aren't in config.py's asset-class lists, so tag
+        # them explicitly -- we know they're all equities from the source.
+        df["asset_class"] = "company"
 
     if args.history:
         df = with_trailing_returns(df)
@@ -84,9 +120,35 @@ def main():
             print(f"Note: Graham criteria only apply to companies -- skipping (N/A): {', '.join(non_company)}\n")
 
         min_cap = args.graham_min_market_cap if args.graham_min_market_cap is not None else DEFAULT_MIN_MARKET_CAP
-        df = graham_screen(df, use_cache=not args.refresh, min_market_cap=min_cap)
 
-        if args.graham_only:
+        graham_target_df = df
+        prefiltered_out = pd.DataFrame()
+        if args.discover:
+            # Full Graham checks need 3 extra API calls per company (balance sheet,
+            # income statement, dividends) -- with hundreds of companies that adds up,
+            # so reject the obviously-too-expensive ones first using data we already have.
+            pe_ok = df["trailing_pe"].isna() | (df["trailing_pe"] <= args.prefilter_max_pe)
+            pb_ok = df["price_to_book"].isna() | (df["price_to_book"] <= args.prefilter_max_pb)
+            keep_mask = pe_ok & pb_ok
+            graham_target_df = df[keep_mask]
+            prefiltered_out = df[~keep_mask].copy()
+            print(f"Quick pre-filter (P/E <= {args.prefilter_max_pe}, P/B <= {args.prefilter_max_pb}): "
+                  f"{len(graham_target_df)}/{len(df)} companies advance to full Graham checks "
+                  f"({len(prefiltered_out)} excluded up front -- widen with --prefilter-max-pe/--prefilter-max-pb "
+                  f"if you don't want this shortcut).\n")
+
+        df_screened = graham_screen(graham_target_df, use_cache=not args.refresh, min_market_cap=min_cap)
+
+        if not prefiltered_out.empty:
+            prefiltered_out["graham_score"] = "excluded by pre-filter"
+            prefiltered_out["passes_graham"] = False
+            for col in CRITERIA_LABELS.values():
+                prefiltered_out[col] = None
+            df = pd.concat([df_screened, prefiltered_out], ignore_index=True, sort=False)
+        else:
+            df = df_screened
+
+        if args.graham_only or (args.discover and not args.discover_show_all):
             df = df[df["passes_graham"] == True]  # noqa: E712 (pandas boolean mask, not a plain bool compare)
             if df.empty:
                 print("No companies passed every evaluable Graham criterion.")
@@ -134,7 +196,8 @@ def main():
 
     if not args.no_save:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        out_path = OUTPUT_DIR / f"lse_snapshot_{timestamp}.csv"
+        prefix = "graham_discovery" if args.discover else "lse_snapshot"
+        out_path = OUTPUT_DIR / f"{prefix}_{timestamp}.csv"
         df.to_csv(out_path, index=False)
         print(f"\nSaved full snapshot to {out_path}")
 
