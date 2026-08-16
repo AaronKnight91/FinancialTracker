@@ -30,8 +30,19 @@ UNIVERSE_CACHE_TTL_DAYS = 30  # constituent lists barely change; no need to re-s
 WIKI_FTSE_100_URL = "https://en.wikipedia.org/wiki/FTSE_100_Index"
 WIKI_FTSE_250_URL = "https://en.wikipedia.org/wiki/FTSE_250_Index"
 
-# Wikipedia blocks the default pandas/urllib user-agent fairly often
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; lse-analyzer/1.0; personal research use)"}
+# Wikimedia's bot-detection wants a genuinely descriptive User-Agent (see
+# https://meta.wikimedia.org/wiki/User-Agent_policy) -- a browser-spoofing
+# string is more likely to get flagged as automated traffic, not less.
+_HEADERS = {
+    "User-Agent": "lse-analyzer/1.0 (personal finance research script; low request volume) python-requests"
+}
+
+# Be gentle: a short pause between the two page fetches, and back off with
+# retries if Wikipedia's rate limiter fires (a single 403 doesn't have to
+# fail the whole run).
+_REQUEST_DELAY_SECONDS = 2
+_MAX_RETRIES = 3
+_RETRY_BACKOFF_SECONDS = [3, 8, 15]
 
 
 def to_yahoo_ticker(epic: str) -> str:
@@ -47,15 +58,16 @@ def to_yahoo_ticker(epic: str) -> str:
     return f"{epic}.L"
 
 
-def _read_cache() -> dict | None:
+def _read_cache(ignore_ttl: bool = False) -> dict | None:
     if not UNIVERSE_CACHE_PATH.exists():
         return None
     try:
         with open(UNIVERSE_CACHE_PATH) as f:
             cached = json.load(f)
-        age_days = (time.time() - cached["fetched_at"]) / 86400
-        if age_days > UNIVERSE_CACHE_TTL_DAYS:
-            return None
+        if not ignore_ttl:
+            age_days = (time.time() - cached["fetched_at"]) / 86400
+            if age_days > UNIVERSE_CACHE_TTL_DAYS:
+                return None
         return cached["tickers"]
     except Exception:
         return None
@@ -69,9 +81,28 @@ def _write_cache(tickers: dict) -> None:
 
 def _scrape_wikipedia_table(url: str) -> dict:
     """Fetches a Wikipedia constituents page and pulls out the table
-    containing a 'Ticker' column. Returns {yahoo_ticker: company_name}."""
-    resp = requests.get(url, headers=_HEADERS, timeout=15)
-    resp.raise_for_status()
+    containing a 'Ticker' column. Returns {yahoo_ticker: company_name}.
+    Retries with backoff on rate-limit/server errors (Wikipedia's bot
+    mitigation can reject an occasional request even at low volume)."""
+    last_error = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=15)
+            resp.raise_for_status()
+            break
+        except requests.exceptions.HTTPError as e:
+            last_error = e
+            status = e.response.status_code if e.response is not None else None
+            if status in (403, 429) or (status is not None and status >= 500):
+                if attempt < _MAX_RETRIES - 1:
+                    wait = _RETRY_BACKOFF_SECONDS[attempt]
+                    print(f"  [warn] Wikipedia returned {status} for {url}, retrying in {wait}s "
+                          f"(attempt {attempt + 1}/{_MAX_RETRIES})...")
+                    time.sleep(wait)
+                    continue
+            raise
+    else:
+        raise last_error
 
     tables = pd.read_html(io.StringIO(resp.text))
     ticker_table = None
@@ -99,21 +130,60 @@ def _scrape_wikipedia_table(url: str) -> dict:
 
 def fetch_ftse_universe(include_250: bool = True, use_cache: bool = True, force_refresh: bool = False) -> dict:
     """FTSE 100 (+ optionally FTSE 250) constituents, scraped from Wikipedia.
-    Cached locally for UNIVERSE_CACHE_TTL_DAYS since this barely changes."""
+    Cached locally for UNIVERSE_CACHE_TTL_DAYS since this barely changes.
+
+    Resilient to partial failure: if FTSE 100 succeeds but FTSE 250 doesn't
+    (or vice versa), returns what it has rather than losing everything. If
+    both fail outright, falls back to a stale cache if one exists, rather
+    than leaving --discover with nothing to scan.
+    """
     if use_cache and not force_refresh:
         cached = _read_cache()
         if cached is not None:
             return cached
 
     universe = {}
+    errors = []
+
     print("Fetching FTSE 100 constituents from Wikipedia...")
-    universe.update(_scrape_wikipedia_table(WIKI_FTSE_100_URL))
+    try:
+        universe.update(_scrape_wikipedia_table(WIKI_FTSE_100_URL))
+    except Exception as e:
+        errors.append(("FTSE 100", e))
+        print(f"  [warn] Couldn't fetch FTSE 100 constituents: {e}")
 
     if include_250:
+        time.sleep(_REQUEST_DELAY_SECONDS)  # a small gap between requests, not a burst
         print("Fetching FTSE 250 constituents from Wikipedia...")
-        universe.update(_scrape_wikipedia_table(WIKI_FTSE_250_URL))
+        try:
+            universe.update(_scrape_wikipedia_table(WIKI_FTSE_250_URL))
+        except Exception as e:
+            errors.append(("FTSE 250", e))
+            print(f"  [warn] Couldn't fetch FTSE 250 constituents: {e}")
 
-    if use_cache:
+    if not universe:
+        # Total failure -- try a stale cache before giving up entirely.
+        stale = _read_cache(ignore_ttl=True)
+        if stale:
+            print("Wikipedia fetch failed completely; using a previously cached ticker "
+                  "list instead (may be out of date -- rerun with --discover-refresh-universe "
+                  "later to update it).")
+            return stale
+        raise RuntimeError(
+            "Couldn't fetch the FTSE universe from Wikipedia and no cached copy exists. "
+            "This is usually Wikipedia's rate limiting, not a code problem -- wait a few "
+            "minutes and try again, or in the meantime try "
+            "'--discover --discover-ftse100-only' (one page instead of two), or "
+            "'--discover --discover-source fmp' if you have an FMP_API_KEY set."
+        )
+
+    if errors and use_cache:
+        print(f"Note: proceeding with a partial universe ({len(universe)} companies) -- "
+              f"{', '.join(name for name, _ in errors)} couldn't be fetched this run.")
+
+    if use_cache and not errors:
+        # Only cache a complete result -- caching a partial list would silently
+        # shrink future runs until the next forced refresh.
         _write_cache(universe)
 
     return universe

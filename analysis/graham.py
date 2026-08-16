@@ -146,7 +146,7 @@ def evaluate_graham(fundamentals: dict, raw: dict, min_market_cap: float = DEFAU
     criteria = {}
 
     market_cap = fundamentals.get("market_cap")
-    criteria["adequate_size"] = None if market_cap is None else market_cap >= min_market_cap
+    criteria["adequate_size"] = None if pd.isna(market_cap) else market_cap >= min_market_cap
 
     current_ratio = raw.get("current_ratio")
     working_capital = raw.get("working_capital")
@@ -185,12 +185,12 @@ def evaluate_graham(fundamentals: dict, raw: dict, min_market_cap: float = DEFAU
             criteria["earnings_growth"] = None
 
     pe = fundamentals.get("trailing_pe")
-    criteria["moderate_pe"] = None if pe is None else (0 < pe <= MAX_PE)
+    criteria["moderate_pe"] = None if pd.isna(pe) else (0 < pe <= MAX_PE)
 
     pb = fundamentals.get("price_to_book")
-    criteria["moderate_pb"] = None if pb is None else (0 < pb <= MAX_PB)
+    criteria["moderate_pb"] = None if pd.isna(pb) else (0 < pb <= MAX_PB)
 
-    if pe is not None and pb is not None and pe > 0 and pb > 0:
+    if pd.notna(pe) and pd.notna(pb) and pe > 0 and pb > 0:
         criteria["graham_number"] = (pe * pb) <= MAX_GRAHAM_NUMBER
     else:
         criteria["graham_number"] = None

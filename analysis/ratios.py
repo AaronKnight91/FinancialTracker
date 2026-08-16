@@ -23,16 +23,30 @@ SORT_ASCENDING = {
     "market_cap": False,
 }
 
+# Every fundamentals field that should behave as a plain number. yfinance/FMP
+# occasionally hand back a stray non-numeric value for an edge-case ticker
+# (e.g. a string like "Infinity" for a company with near-zero earnings) --
+# coercing these to numeric at the DataFrame boundary means every downstream
+# comparison, sort, screen, and Graham check gets a clean float/NaN column
+# instead of tripping over one bad value hiding in an "object" dtype column.
+NUMERIC_FUNDAMENTAL_COLUMNS = [
+    "market_cap", "trailing_pe", "forward_pe", "price_to_book", "dividend_yield",
+    "fifty_two_week_high", "fifty_two_week_low", "beta", "debt_to_equity",
+    "return_on_equity", "profit_margin",
+]
+
 
 def build_dataframe(records: list) -> pd.DataFrame:
     df = pd.DataFrame(records)
-    # dividend_yield and return_on_equity come back from yfinance as fractions (0.03 = 3%).
-    # Missing values arrive as Python None (e.g. ETFs/gilts have no dividend_yield field),
-    # which keeps a column as object dtype rather than float -- pd.to_numeric coerces
-    # None -> NaN so later arithmetic/rounding doesn't choke on a raw None.
+
+    for col in NUMERIC_FUNDAMENTAL_COLUMNS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    # dividend_yield and return_on_equity come back from yfinance as fractions (0.03 = 3%)
     for pct_col in ["dividend_yield", "return_on_equity", "profit_margin"]:
         if pct_col in df.columns:
-            df[pct_col + "_pct"] = pd.to_numeric(df[pct_col], errors="coerce") * 100
+            df[pct_col + "_pct"] = df[pct_col] * 100  # already numeric from the coercion above
     return df
 
 
