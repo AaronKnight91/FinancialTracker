@@ -62,6 +62,7 @@ python main.py --screen --max-pe 15 --min-div-yield 3
 python main.py --asset-class company --graham
 python main.py --asset-class company --graham --graham-only
 python main.py --discover              # scan the whole FTSE 100+250 for Graham passers
+python main.py --dividends              # full dividend payment history + summary columns
 ```
 
 Every run prints a comparison table and saves a full CSV snapshot to
@@ -147,6 +148,42 @@ of cases but isn't a verified lookup table. A handful of tickers may not
 resolve correctly; these will just show up as "no data returned" rather than
 break the run.
 
+## Full dividend payment history (`--dividends`)
+
+```bash
+python main.py --dividends                       # your watchlist, with dividend summary columns
+python main.py --asset-class etf --dividends       # works for ETFs/ETCs/gilts too, not just companies
+python main.py --discover --dividends              # combine with discovery/screening
+```
+
+Adds four summary columns to the comparison table:
+
+| Column | Meaning |
+|---|---|
+| `Div Yrs` | Number of distinct calendar years with at least one payment, in whatever history is available |
+| `TTM Div` | Total dividend/distribution amount paid in the trailing 12 months |
+| `Last Div Date` | Date of the most recent payment |
+| `Last Div Amt` | Amount of the most recent payment |
+
+**Every individual payment is also saved**, not just the summary: each run
+writes `output/dividend_history_<timestamp>.csv` with one row per payment
+(`ticker, date, amount, source`), and the same data is persisted to
+`data/market_data.db`'s `dividends` table so it accumulates across scheduled
+runs rather than being overwritten.
+
+**Where the data comes from:** yfinance's dividend history is the default
+source, but it's sometimes thin for LSE-listed instruments -- a handful of
+years, or occasionally empty for one that clearly does pay a regular
+dividend. If `FMP_API_KEY` is set and yfinance's history covers fewer than
+5 distinct years, `--dividends` also tries Financial Modeling Prep's
+historical dividend endpoint and keeps whichever source actually covers
+more years. Without an FMP key, you get yfinance's data as-is.
+
+This also improves the `--graham` "dividend record" criterion for free:
+`analysis/graham.py` uses the same fallback-aware fetch, so a company that
+looked like it had no dividend history via yfinance alone may now show a
+real (if still shorter-than-Graham's-20-years) record if FMP has more.
+
 ## Project structure
 
 ```
@@ -157,9 +194,10 @@ lse_analyzer/
 ├── run_monthly.sh            # cron wrapper for scheduled (e.g. Pi) runs
 ├── data/
 │   ├── cache.py             # short-term TTL cache (avoids re-hitting APIs same-day)
-│   ├── storage.py           # long-term SQLite store: price history + dated snapshots
+│   ├── storage.py           # long-term SQLite store: price history, dated snapshots, dividends
 │   ├── fetchers.py          # yfinance + FMP fallback fetching, cache-aware
-│   └── universe.py          # discovers LSE tickers to scan for --discover (Wikipedia/FMP)
+│   ├── universe.py          # discovers LSE tickers to scan for --discover (Wikipedia/FMP)
+│   └── dividends.py         # dividend payment history, yfinance + FMP fallback
 ├── analysis/
 │   ├── ratios.py              # ratio calcs, screening, sorting, trailing returns
 │   └── graham.py              # Benjamin Graham defensive-investor screen (--graham)

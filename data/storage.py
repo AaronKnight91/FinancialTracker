@@ -60,6 +60,15 @@ def init_db():
                 PRIMARY KEY (ticker, run_date)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS dividends (
+                ticker TEXT NOT NULL,
+                ex_date TEXT NOT NULL,
+                amount REAL,
+                source TEXT,
+                PRIMARY KEY (ticker, ex_date)
+            )
+        """)
 
 
 def save_prices(ticker: str, df: pd.DataFrame) -> None:
@@ -104,6 +113,26 @@ def save_graham_result(ticker: str, run_date: str, graham_score: str, passes_gra
             "UPDATE snapshots SET graham_score = ?, passes_graham = ? WHERE ticker = ? AND run_date = ?",
             (graham_score, None if passes_graham is None else int(passes_graham), ticker, run_date),
         )
+
+
+def save_dividends(ticker: str, records: list) -> None:
+    """records: [{date, amount, source}, ...] as returned by data/dividends.py."""
+    if not records:
+        return
+    rows = [(ticker, r["date"], r["amount"], r.get("source")) for r in records]
+    with _connect() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO dividends (ticker, ex_date, amount, source) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+
+
+def dividend_history(ticker: str) -> pd.DataFrame:
+    with _connect() as conn:
+        df = pd.read_sql_query(
+            "SELECT * FROM dividends WHERE ticker = ? ORDER BY ex_date", conn, params=(ticker,)
+        )
+    return df
 
 
 def latest_snapshot() -> pd.DataFrame:

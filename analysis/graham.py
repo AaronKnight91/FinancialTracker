@@ -51,6 +51,7 @@ import yfinance as yf
 
 import data.cache as cache
 import data.storage as storage
+import data.dividends as dividends
 
 DEFAULT_MIN_MARKET_CAP = 100_000_000  # adapted "adequate size" floor, see module docstring
 MIN_CURRENT_RATIO = 2.0
@@ -130,9 +131,8 @@ def fetch_graham_raw(ticker: str) -> dict:
         print(f"  [warn] Graham income statement data unavailable for {ticker}: {e}")
 
     try:
-        dividends = t.dividends
-        if dividends is not None and not dividends.empty:
-            raw["dividend_years"] = sorted(set(int(y) for y in dividends.index.year))
+        div_records = dividends.get_dividend_history(ticker)
+        raw["dividend_years"] = sorted({int(r["date"][:4]) for r in div_records})
     except Exception as e:
         print(f"  [warn] Graham dividend history unavailable for {ticker}: {e}")
 

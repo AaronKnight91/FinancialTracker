@@ -14,6 +14,7 @@ Usage:
     python main.py --asset-class company --graham --graham-only
     python main.py --discover                      # scan the FTSE 100+250 for Graham passers
     python main.py --discover --discover-limit 30   # quick test run on a subset
+    python main.py --dividends                      # full dividend payment history + summary columns
 """
 import argparse
 import json
@@ -25,6 +26,8 @@ from tabulate import tabulate
 from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS
 from data.fetchers import get_watchlist_fundamentals
 import data.universe as universe
+import data.dividends as dividends
+import data.storage as storage
 from analysis.ratios import build_dataframe, sort_dataframe, format_for_display, screen, with_trailing_returns
 from analysis.graham import graham_screen, CRITERIA_LABELS, DEFAULT_MIN_MARKET_CAP
 
@@ -74,6 +77,10 @@ def parse_args():
                          help="With --discover, only run full (slow) Graham checks on companies at or below this P/E first (default 20)")
     parser.add_argument("--prefilter-max-pb", type=float, default=2.5,
                          help="With --discover, only run full (slow) Graham checks on companies at or below this P/B first (default 2.5)")
+    parser.add_argument("--dividends", action="store_true",
+                         help="Fetch full dividend payment history for each instrument (falls back to FMP "
+                              "if yfinance's coverage is thin and FMP_API_KEY is set), add summary columns, "
+                              "and export the full payment history to output/")
     parser.add_argument("--no-save", action="store_true", help="Don't write a CSV snapshot to output/")
     return parser.parse_args()
 
@@ -154,6 +161,40 @@ def main():
                 print("No companies passed every evaluable Graham criterion.")
                 return
 
+    if args.dividends:
+        print(f"Fetching dividend history for {len(df)} tickers "
+              f"(falls back to FMP if yfinance's coverage looks thin and FMP_API_KEY is set)...")
+        storage.init_db()
+
+        all_payments = []
+        years_col, ttm_col, last_date_col, last_amount_col = [], [], [], []
+        for _, row in df.iterrows():
+            ticker = row["ticker"]
+            records = dividends.get_dividend_history(ticker, use_cache=not args.refresh)
+            storage.save_dividends(ticker, records)
+            all_payments.extend({"ticker": ticker, **r} for r in records)
+
+            summary = dividends.summarize(records)
+            years_col.append(summary["dividend_years_count"])
+            ttm_col.append(summary["ttm_dividend"])
+            last_date_col.append(summary["last_dividend_date"])
+            last_amount_col.append(summary["last_dividend_amount"])
+
+        df["dividend_years_count"] = years_col
+        df["ttm_dividend"] = ttm_col
+        df["last_dividend_date"] = last_date_col
+        df["last_dividend_amount"] = last_amount_col
+
+        if all_payments and not args.no_save:
+            payments_df = pd.DataFrame(all_payments)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            div_path = OUTPUT_DIR / f"dividend_history_{timestamp}.csv"
+            payments_df.to_csv(div_path, index=False)
+            print(f"Saved full dividend payment history ({len(payments_df)} payments across "
+                  f"{df['ticker'].nunique()} tickers) to {div_path}\n")
+        elif not all_payments:
+            print("No dividend history found for any ticker in this run.\n")
+
     if args.screen:
         df = screen(
             df,
@@ -183,6 +224,15 @@ def main():
         graham_cols = [c for c in graham_cols if c in df.columns]
         for c in graham_cols:
             display_df[c] = df[c]
+
+    if args.dividends:
+        div_display = {
+            "dividend_years_count": "Div Yrs", "ttm_dividend": "TTM Div",
+            "last_dividend_date": "Last Div Date", "last_dividend_amount": "Last Div Amt",
+        }
+        for col, label in div_display.items():
+            if col in df.columns:
+                display_df[label] = df[col]
 
     print(tabulate(display_df, headers="keys", tablefmt="simple", showindex=False))
 
