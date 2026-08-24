@@ -15,19 +15,24 @@ Usage:
     python main.py --discover                      # scan the FTSE 100+250 for Graham passers
     python main.py --discover --discover-limit 30   # quick test run on a subset
     python main.py --dividends                      # full dividend payment history + summary columns
+    python main.py --import-portfolio my_isa.csv --portfolio-name ISA
+    python main.py --import-portfolio jan.csv feb.csv mar.csv --portfolio-name ISA
+    python main.py --list-portfolios
 """
 import argparse
 import json
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 from tabulate import tabulate
 
-from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS
+from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS, asset_class_for
 from data.fetchers import get_watchlist_fundamentals
 import data.universe as universe
 import data.dividends as dividends
 import data.storage as storage
+import data.portfolio as portfolio
 from analysis.ratios import build_dataframe, sort_dataframe, format_for_display, screen, with_trailing_returns
 from analysis.graham import graham_screen, CRITERIA_LABELS, DEFAULT_MIN_MARKET_CAP
 
@@ -39,6 +44,26 @@ def load_watchlist(path) -> dict:
         data = json.load(f)
     tickers = data["watchlist"]
     return {t: ALL_INSTRUMENTS.get(t, t) for t in tickers}
+
+
+def add_missing_to_watchlist(portfolio_tickers: dict, watchlist_path: str) -> list:
+    """Adds any ticker from portfolio_tickers not already present in the
+    watchlist JSON file, and writes the file back. Returns the tickers
+    actually added (empty if everything was already there)."""
+    path = Path(watchlist_path)
+    if path.exists():
+        with open(path) as f:
+            data = json.load(f)
+    else:
+        data = {"watchlist": []}
+
+    existing = set(data.get("watchlist", []))
+    added = [t for t in portfolio_tickers if t not in existing]
+    if added:
+        data["watchlist"] = data.get("watchlist", []) + added
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+    return added
 
 
 def parse_args():
@@ -81,12 +106,73 @@ def parse_args():
                          help="Fetch full dividend payment history for each instrument (falls back to FMP "
                               "if yfinance's coverage is thin and FMP_API_KEY is set), add summary columns, "
                               "and export the full payment history to output/")
+    parser.add_argument("--import-portfolio", nargs="+", metavar="CSV_PATH", default=None,
+                         help="Import one or more Freetrade transaction history CSV exports into a portfolio "
+                              "(duplicate rows across files are automatically skipped)")
+    parser.add_argument("--portfolio-name", default=None,
+                         help="Name for the portfolio being imported (used to name its tables); "
+                              "defaults to the first CSV file's name")
+    parser.add_argument("--list-portfolios", action="store_true",
+                         help="List portfolios that have been imported so far, then exit")
     parser.add_argument("--no-save", action="store_true", help="Don't write a CSV snapshot to output/")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    if args.list_portfolios:
+        names = portfolio.list_portfolios()
+        if names:
+            print("Portfolios imported so far:")
+            for name in names:
+                print(f"  - {name}")
+        else:
+            print("No portfolios imported yet. Use --import-portfolio to add one.")
+        return
+
+    if args.import_portfolio:
+        portfolio_name = args.portfolio_name or Path(args.import_portfolio[0]).stem
+        print(f"Importing {len(args.import_portfolio)} file(s) into portfolio '{portfolio_name}'...")
+
+        summary = portfolio.import_transactions(portfolio_name, args.import_portfolio)
+        print(f"  {summary['rows_seen']} transaction rows read: "
+              f"{summary['rows_inserted']} new, "
+              f"{summary['rows_duplicate']} already present (skipped as duplicates).\n")
+
+        portfolio_tickers = portfolio.get_portfolio_tickers(portfolio_name)
+        print(f"{len(portfolio_tickers)} distinct tickers held in this portfolio's history.")
+
+        added = add_missing_to_watchlist(portfolio_tickers, args.watchlist)
+        if added:
+            print(f"Added {len(added)} new ticker(s) to {args.watchlist}: {', '.join(added)}")
+        else:
+            print(f"No new tickers to add to {args.watchlist} -- all already present.")
+
+        print(f"\nFetching fundamentals for {len(portfolio_tickers)} portfolio tickers...")
+        records = get_watchlist_fundamentals(portfolio_tickers, use_cache=not args.refresh)
+        port_df = build_dataframe(records)
+        port_df["asset_class"] = port_df["ticker"].apply(asset_class_for)
+
+        missing = port_df[port_df["name"].isna()]["ticker"].tolist() if "name" in port_df.columns else []
+        if missing:
+            print(f"Warning: no data returned for: {', '.join(missing)} (check ticker or data source availability)\n")
+
+        run_date = datetime.now().strftime("%Y-%m-%d")
+        ratio_records = []
+        for _, row in port_df.iterrows():
+            record = row.to_dict()
+            record["run_date"] = run_date
+            ratio_records.append(record)
+        portfolio.save_portfolio_ratios(portfolio_name, ratio_records)
+
+        ratios_table = portfolio.ratios_table_name(portfolio_name)
+        print(f"Saved ratios for {len(ratio_records)} companies to the '{ratios_table}' table "
+              f"in data/market_data.db.\n")
+
+        display_df = format_for_display(port_df)
+        print(tabulate(display_df, headers="keys", tablefmt="simple", showindex=False))
+        return
 
     if args.discover:
         print(f"Discovering LSE company universe (source={args.discover_source})...")

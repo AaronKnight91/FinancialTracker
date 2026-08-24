@@ -63,6 +63,7 @@ python main.py --asset-class company --graham
 python main.py --asset-class company --graham --graham-only
 python main.py --discover              # scan the whole FTSE 100+250 for Graham passers
 python main.py --dividends              # full dividend payment history + summary columns
+python main.py --import-portfolio my_isa.csv --portfolio-name ISA  # import a broker export
 ```
 
 Every run prints a comparison table and saves a full CSV snapshot to
@@ -184,6 +185,68 @@ This also improves the `--graham` "dividend record" criterion for free:
 looked like it had no dividend history via yfinance alone may now show a
 real (if still shorter-than-Graham's-20-years) record if FMP has more.
 
+## Importing your own portfolio (`--import-portfolio`)
+
+Imports a broker transaction history export, tracks it in its own set of
+database tables, and calculates ratios for whatever you actually hold —
+currently supports **Freetrade's** CSV export format.
+
+```bash
+# Export your transaction history from the Freetrade app first
+# (Account -> Statements & documents -> Transaction history)
+
+python main.py --import-portfolio freetrade_export.csv --portfolio-name ISA
+python main.py --import-portfolio jan.csv feb.csv mar.csv --portfolio-name ISA  # several files at once
+python main.py --import-portfolio my_gia_export.csv --portfolio-name GIA        # a separate portfolio
+python main.py --list-portfolios                                                 # see what's been imported
+```
+
+Each run:
+
+1. **Parses the CSV** and validates it actually looks like a Freetrade export
+   (checks for the expected columns) before touching anything.
+2. **Deduplicates automatically.** Every transaction row is fingerprinted by
+   hashing every column's value together; that fingerprint is the row's
+   primary key in the database, so re-importing a file you've already
+   loaded — or a newer export whose date range overlaps an old one, which
+   is the normal case for "last 12 months" broker exports — only inserts
+   the transactions that are actually new. You'll never get duplicate rows
+   from importing multiple overlapping files, and it's safe to just
+   re-import your latest export every so often rather than tracking exactly
+   what's new yourself.
+3. **Extracts every distinct ticker** ever seen in the portfolio's history
+   (buys, sells, and dividend payments all carry a ticker) and adds any that
+   aren't already in `watchlist.json`, without touching entries already there.
+4. **Fetches ratios and saves them** to a table scoped to that portfolio.
+
+**Multiple portfolios stay completely separate.** Each portfolio gets its
+own pair of tables in `data/market_data.db`:
+
+```
+portfolio_<name>_transactions   -- every transaction row, deduplicated
+portfolio_<name>_ratios         -- latest ratios for tickers held
+```
+
+e.g. `--portfolio-name ISA` and `--portfolio-name GIA` produce
+`portfolio_isa_transactions` / `portfolio_isa_ratios` and
+`portfolio_gia_transactions` / `portfolio_gia_ratios` — importing into one
+never reads from or writes to the other.
+
+**A caveat on the dedup mechanism:** `TOP_UP` and `INTEREST_FROM_CASH` rows
+in Freetrade's export don't carry a broker-assigned order ID the way trades
+do, so their fingerprint is based on timestamp + amount + type instead. Two
+genuinely separate interest payments of the same amount at the exact same
+timestamp would be indistinguishable — not realistically possible for real
+broker data (which timestamps to the second), but worth knowing about if
+you ever see a payment count that looks one short.
+
+**Adapting this to a different broker:** `data/portfolio.py`'s dedup,
+per-portfolio tables, watchlist sync, and ratio calculation are all broker-
+agnostic — only `read_freetrade_csv()` (and the `FREETRADE_COLUMNS` list it
+checks against) is specific to Freetrade's export format. Swapping in
+another broker's CSV mainly means writing an equivalent parsing function
+for its column layout.
+
 ## Project structure
 
 ```
@@ -197,7 +260,8 @@ lse_analyzer/
 │   ├── storage.py           # long-term SQLite store: price history, dated snapshots, dividends
 │   ├── fetchers.py          # yfinance + FMP fallback fetching, cache-aware
 │   ├── universe.py          # discovers LSE tickers to scan for --discover (Wikipedia/FMP)
-│   └── dividends.py         # dividend payment history, yfinance + FMP fallback
+│   ├── dividends.py         # dividend payment history, yfinance + FMP fallback
+│   └── portfolio.py         # imports broker transaction CSVs into per-portfolio tables
 ├── analysis/
 │   ├── ratios.py              # ratio calcs, screening, sorting, trailing returns
 │   └── graham.py              # Benjamin Graham defensive-investor screen (--graham)
