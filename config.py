@@ -13,10 +13,17 @@ from dotenv import load_dotenv
 load_dotenv()
 
 BASE_DIR = Path(__file__).resolve().parent
-OUTPUT_DIR = BASE_DIR / "output"
-OUTPUT_DIR.mkdir(exist_ok=True)
-REPORTS_DIR = BASE_DIR / "reports"
-REPORTS_DIR.mkdir(exist_ok=True)
+
+# Where CSV outputs (comparison snapshots, dividend history exports, delisted
+# companies list) get saved. Override in .env, or per-run with --output-dir.
+_output_dir_env = os.getenv("OUTPUT_DIR", "").strip()
+OUTPUT_DIR = Path(_output_dir_env) if _output_dir_env else (BASE_DIR / "output")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Where run_monthly.sh writes cron logs. Same override pattern.
+_reports_dir_env = os.getenv("REPORTS_DIR", "").strip()
+REPORTS_DIR = Path(_reports_dir_env) if _reports_dir_env else (BASE_DIR / "reports")
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- Caching ---
 # Short-term cache: avoids re-hitting APIs for repeated runs within CACHE_TTL_HOURS.

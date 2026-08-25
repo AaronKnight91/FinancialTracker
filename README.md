@@ -70,6 +70,28 @@ python main.py --list-delisted          # export Wikipedia's formerly-listed LSE
 Every run prints a comparison table and saves a full CSV snapshot to
 `output/`, timestamped.
 
+### Choosing where outputs get saved
+
+By default, every CSV this tool produces (comparison snapshots, dividend
+history exports, the delisted companies list) goes to `./output`. Change
+that either in `.env`:
+
+```bash
+OUTPUT_DIR=/home/pi/lse-reports
+```
+
+or per-run on the command line, which takes priority over `.env`:
+
+```bash
+python main.py --output-dir /home/pi/lse-reports
+python main.py --dividends --output-dir D:\Reports\LSE
+```
+
+Either way, the directory is created automatically if it doesn't exist yet
+(including any missing parent folders). `run_monthly.sh`'s cron logs have
+the same override available via `REPORTS_DIR` in `.env` (no command-line
+flag for that one, since the cron script itself isn't interactive).
+
 ## Benjamin Graham "defensive investor" screen (`--graham`)
 
 Adds columns evaluating each company against Graham's classic criteria from

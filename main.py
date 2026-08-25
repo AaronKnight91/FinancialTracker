@@ -158,6 +158,9 @@ def parse_args():
                          help="With --list-delisted, force re-fetching from Wikipedia instead of using the "
                               "local cache (~30 day TTL)")
     parser.add_argument("--no-save", action="store_true", help="Don't write a CSV snapshot to output/")
+    parser.add_argument("--output-dir", default=None,
+                         help=f"Directory to save CSV outputs to (default: OUTPUT_DIR env var, "
+                              f"currently {OUTPUT_DIR})")
     return parser.parse_args()
 
 
@@ -211,6 +214,8 @@ def import_and_process_portfolio(portfolio_name: str, csv_paths: list, args) -> 
 
 def main():
     args = parse_args()
+    output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     if args.list_portfolios:
         names = portfolio.list_portfolios()
@@ -240,7 +245,7 @@ def main():
             print(delisted_df.to_string(index=False))
         else:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = OUTPUT_DIR / f"delisted_companies_{timestamp}.csv"
+            out_path = output_dir / f"delisted_companies_{timestamp}.csv"
             delisted_df.to_csv(out_path, index=False)
             print(f"Saved to {out_path}")
         return
@@ -396,7 +401,7 @@ def main():
         if all_payments and not args.no_save:
             payments_df = pd.DataFrame(all_payments)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            div_path = OUTPUT_DIR / f"dividend_history_{timestamp}.csv"
+            div_path = output_dir / f"dividend_history_{timestamp}.csv"
             payments_df.to_csv(div_path, index=False)
             print(f"Saved full dividend payment history ({len(payments_df)} payments across "
                   f"{df['ticker'].nunique()} tickers) to {div_path}\n")
@@ -455,7 +460,7 @@ def main():
     if not args.no_save:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         prefix = "graham_discovery" if args.discover else "lse_snapshot"
-        out_path = OUTPUT_DIR / f"{prefix}_{timestamp}.csv"
+        out_path = output_dir / f"{prefix}_{timestamp}.csv"
         df.to_csv(out_path, index=False)
         print(f"\nSaved full snapshot to {out_path}")
 
