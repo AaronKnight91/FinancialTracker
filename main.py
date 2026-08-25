@@ -12,6 +12,8 @@ Usage:
     python main.py --history
     python main.py --graham
     python main.py --asset-class company --graham --graham-only
+    python main.py --all --graham-top 10            # top 10 most desirable Graham picks, right now
+    python main.py --discover --graham-top 10        # same, but scanning the whole FTSE 100+250 first
     python main.py --discover                      # scan the FTSE 100+250 for Graham passers
     python main.py --discover --discover-limit 30   # quick test run on a subset
     python main.py --dividends                      # full dividend payment history + summary columns
@@ -32,14 +34,14 @@ from pathlib import Path
 import pandas as pd
 from tabulate import tabulate
 
-from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS, asset_class_for, BROKER_EXPORTS_DIR
+from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS, asset_class_for, BROKER_EXPORTS_DIR, CACHE_TTL_HOURS
 from data.fetchers import get_watchlist_fundamentals
 import data.universe as universe
 import data.dividends as dividends
 import data.storage as storage
 import data.portfolio as portfolio
 from analysis.ratios import build_dataframe, sort_dataframe, format_for_display, screen, with_trailing_returns
-from analysis.graham import graham_screen, CRITERIA_LABELS, DEFAULT_MIN_MARKET_CAP
+from analysis.graham import graham_screen, rank_desirable, CRITERIA_LABELS, DEFAULT_MIN_MARKET_CAP
 
 
 def load_watchlist(path) -> dict:
@@ -110,7 +112,12 @@ def parse_args():
     parser.add_argument("--graham", action="store_true",
                          help="Evaluate each company against Benjamin Graham's defensive-investor criteria (see README for caveats)")
     parser.add_argument("--graham-only", action="store_true",
-                         help="With --graham, show only companies that pass every evaluable Graham criterion")
+                         help="With --graham, show only companies that pass every evaluable Graham criterion "
+                              "(ranked by desirability -- see --graham-top)")
+    parser.add_argument("--graham-top", type=int, default=None, metavar="N",
+                         help="Show only the N most desirable Graham passers, ranked by how many criteria "
+                              "were actually evaluated, then by Graham Number (P/E x P/B, ascending), then "
+                              "dividend yield. Implies --graham and --graham-only")
     parser.add_argument("--graham-min-market-cap", type=float, default=None,
                          help="Override the 'adequate size' market cap floor used by --graham (default £100M)")
     parser.add_argument("--discover", action="store_true",
@@ -216,6 +223,10 @@ def main():
     args = parse_args()
     output_dir = Path(args.output_dir) if args.output_dir else OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.graham_top is not None:
+        args.graham = True
+        args.graham_only = True  # --graham-top always means "passers only, ranked"
 
     if args.list_portfolios:
         names = portfolio.list_portfolios()
@@ -369,10 +380,18 @@ def main():
             df = df_screened
 
         if args.graham_only or (args.discover and not args.discover_show_all):
-            df = df[df["passes_graham"] == True]  # noqa: E712 (pandas boolean mask, not a plain bool compare)
+            df = rank_desirable(df, top_n=args.graham_top)
             if df.empty:
                 print("No companies passed every evaluable Graham criterion.")
                 return
+            print(f"{len(df)} compan{'y passes' if len(df) == 1 else 'ies pass'} every evaluable "
+                  f"Graham criterion, ranked by desirability (most rigorously vetted and cheapest "
+                  f"relative to the Graham Number first).")
+            if not args.refresh:
+                print(f"Note: using cached fundamentals (up to {CACHE_TTL_HOURS:g}h old by default) -- "
+                      f"pass --refresh for the most current data before acting on this list.\n")
+            else:
+                print()
 
     if args.dividends:
         print(f"Fetching dividend history for {len(df)} tickers "
@@ -459,10 +478,17 @@ def main():
 
     if not args.no_save:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        prefix = "graham_discovery" if args.discover else "lse_snapshot"
+        ranked_view = args.graham_only or (args.discover and not args.discover_show_all)
+        if ranked_view:
+            prefix = "graham_top_picks"
+        elif args.discover:
+            prefix = "graham_discovery"
+        else:
+            prefix = "lse_snapshot"
         out_path = output_dir / f"{prefix}_{timestamp}.csv"
         df.to_csv(out_path, index=False)
-        print(f"\nSaved full snapshot to {out_path}")
+        label = "ranked Graham picks" if ranked_view else "full snapshot"
+        print(f"\nSaved {label} to {out_path}")
 
 
 if __name__ == "__main__":

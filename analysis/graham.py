@@ -258,3 +258,44 @@ def graham_screen(df: pd.DataFrame, use_cache: bool = True, min_market_cap: floa
         out[label] = detail_cols[name]
 
     return out
+
+
+def rank_desirable(df: pd.DataFrame, top_n: int = None) -> pd.DataFrame:
+    """Ranks full Graham passers by how strongly they satisfy the criteria --
+    passing isn't binary in practice, since some passes rest on more of
+    Graham's checks than others. Only rows with passes_graham == True are
+    considered "desirable" at all; everything else is dropped.
+
+    Ranking, in priority order:
+      1. More evaluable criteria first (parsed from graham_score's "X/Y").
+         A pass based on 8/8 checks actually applying is more solid than one
+         based on only 4/8, where several criteria were simply unavailable.
+      2. Graham Number (P/E x P/B), ascending. Lower means more margin of
+         safety by Graham's own combined valuation shortcut -- this is the
+         same 22.5 threshold from the pass/fail check, just used to order
+         passers by how far under it they sit, not just whether they clear it.
+      3. Dividend yield, descending, as a final tiebreaker.
+
+    Adds no new columns to the row data itself -- this only re-orders (and
+    optionally truncates) rows that already have graham_screen's output.
+    """
+    if "passes_graham" not in df.columns:
+        raise ValueError("rank_desirable() expects a dataframe that's already been through graham_screen()")
+
+    passers = df[df["passes_graham"] == True].copy()  # noqa: E712
+    if passers.empty:
+        return passers
+
+    criteria_evaluated = passers["graham_score"].astype(str).str.split("/").str[1]
+    passers["_criteria_evaluated"] = pd.to_numeric(criteria_evaluated, errors="coerce")
+    passers["_graham_number"] = passers["trailing_pe"] * passers["price_to_book"]
+
+    ranked = passers.sort_values(
+        by=["_criteria_evaluated", "_graham_number", "dividend_yield"],
+        ascending=[False, True, False],
+        na_position="last",
+    ).drop(columns=["_criteria_evaluated", "_graham_number"])
+
+    if top_n is not None:
+        ranked = ranked.head(top_n)
+    return ranked

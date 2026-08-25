@@ -61,6 +61,7 @@ python main.py --refresh              # ignore cache, force fresh fetch
 python main.py --screen --max-pe 15 --min-div-yield 3
 python main.py --asset-class company --graham
 python main.py --asset-class company --graham --graham-only
+python main.py --all --graham-top 10   # top 10 most desirable Graham picks, ranked
 python main.py --discover              # scan the whole FTSE 100+250 for Graham passers
 python main.py --dividends              # full dividend payment history + summary columns
 python main.py --import-portfolio my_isa.csv --portfolio-name ISA  # import a broker export
@@ -124,6 +125,43 @@ shorter window than Graham intended. Treat `--graham` as a useful first-pass
 screen, not a faithful reproduction of the original test — always sanity-check
 a company's actual 10-year record (e.g. via its annual reports) before acting
 on a "pass".
+
+### Ranking passers by desirability (`--graham-top`)
+
+`--graham-only` shows every full passer, but "passing" isn't binary in
+practice — some passes rest on more of Graham's checks actually applying
+than others, and among full passers some are cheaper than others by
+Graham's own valuation logic. `--graham-top N` ranks passers instead of
+just listing them, and keeps only the top `N`:
+
+```bash
+python main.py --all --graham-top 10           # top 10 most desirable, from your configured universe
+python main.py --discover --graham-top 10      # same, but scanning the whole FTSE 100+250 first
+```
+
+Ranking order:
+1. **More evaluated criteria first** — a pass based on 8/8 checks actually
+   applying is more solid than one based on only 4/8, where several
+   criteria were simply unavailable.
+2. **Graham Number (P/E × P/B), ascending** — the same combined metric from
+   the pass/fail check, now used to rank *how far under* the 22.5 threshold
+   each passer sits, not just whether it clears it. Lower means more margin
+   of safety.
+3. **Dividend yield, descending**, as a final tiebreaker.
+
+`--graham-top` implies `--graham` and `--graham-only` — you don't need to
+pass either separately. The output CSV is named `graham_top_picks_*.csv`
+so it's distinguishable from a plain snapshot.
+
+**On "most up-to-date data":** ranking is only as good as the numbers
+behind it. By default this uses the same 24h cache as everything else in
+the tool (configurable via `CACHE_TTL_HOURS`), and prints a reminder to
+that effect if you haven't passed `--refresh`. For a list you're actually
+about to act on, run with `--refresh` to force a fresh fetch first:
+
+```bash
+python main.py --all --graham-top 10 --refresh
+```
 
 Graham results are also written back into `data/market_data.db` alongside
 each snapshot, so pass/fail is tracked historically across scheduled runs,
