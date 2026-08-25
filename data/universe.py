@@ -2,7 +2,7 @@
 Builds a universe of LSE-listed company tickers to scan, so --discover
 doesn't depend on a hand-maintained watchlist.
 
-Two sources:
+Two sources for LIVE, fetchable tickers:
   1. Wikipedia's FTSE 100 + FTSE 250 constituent tables (free, no API key,
      ~350 companies). This is the default.
   2. Financial Modeling Prep's stock screener, filtered to the LSE exchange
@@ -13,9 +13,21 @@ Two sources:
 Either way, the result is a plain {ticker: name} dict in the same shape
 `config.ALL_INSTRUMENTS` already uses, so it drops straight into the
 existing fetch/analysis pipeline.
+
+A third, DIFFERENT-SHAPED source for company NAMES only (no tickers):
+  3. Wikipedia's "Companies formerly listed on the London Stock Exchange"
+     category. This has no ticker/ISIN data at all, and most delisted
+     companies have no fetchable price data via yfinance anyway -- so this
+     is intentionally NOT plugged into the --discover ratio/Graham pipeline.
+     It's a reference export (see main.py's --list-delisted) of company
+     names + Wikipedia links, for research purposes, and it's far from a
+     complete historical record -- only companies notable enough for a
+     Wikipedia article are included. See README for the fuller picture on
+     why a truly complete delisted-companies list isn't freely available.
 """
 import io
 import json
+import re
 import time
 from pathlib import Path
 
@@ -27,8 +39,15 @@ from config import BASE_DIR, FMP_API_KEY, FMP_BASE_URL
 UNIVERSE_CACHE_PATH = BASE_DIR / "data" / "universe_cache.json"
 UNIVERSE_CACHE_TTL_DAYS = 30  # constituent lists barely change; no need to re-scrape often
 
+DELISTED_CACHE_PATH = BASE_DIR / "data" / "delisted_cache.json"
+DELISTED_CACHE_TTL_DAYS = 30
+
 WIKI_FTSE_100_URL = "https://en.wikipedia.org/wiki/FTSE_100_Index"
 WIKI_FTSE_250_URL = "https://en.wikipedia.org/wiki/FTSE_250_Index"
+WIKI_DELISTED_CATEGORY_URL = (
+    "https://en.wikipedia.org/wiki/Category:"
+    "Companies_formerly_listed_on_the_London_Stock_Exchange"
+)
 
 # Wikimedia's bot-detection wants a genuinely descriptive User-Agent (see
 # https://meta.wikimedia.org/wiki/User-Agent_policy) -- a browser-spoofing
@@ -77,6 +96,29 @@ def _write_cache(tickers: dict) -> None:
     UNIVERSE_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(UNIVERSE_CACHE_PATH, "w") as f:
         json.dump({"fetched_at": time.time(), "tickers": tickers}, f)
+
+
+def _read_json_cache(path: Path, ttl_days: float, ignore_ttl: bool = False):
+    """Generic version of _read_cache, for caches that aren't the ticker
+    universe (keyed under 'data' rather than 'tickers')."""
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            cached = json.load(f)
+        if not ignore_ttl:
+            age_days = (time.time() - cached["fetched_at"]) / 86400
+            if age_days > ttl_days:
+                return None
+        return cached["data"]
+    except Exception:
+        return None
+
+
+def _write_json_cache(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"fetched_at": time.time(), "data": data}, f)
 
 
 def _scrape_wikipedia_table(url: str) -> dict:
@@ -238,3 +280,85 @@ def get_universe(source: str = "wikipedia", include_250: bool = True, min_market
     if limit is not None:
         universe = dict(list(universe.items())[:limit])
     return universe
+
+
+def _parse_wikipedia_category_page(html: str) -> tuple:
+    """Parses one page of a Wikipedia category listing. Returns
+    ({company_name: wikipedia_url}, next_page_url_or_None).
+
+    MediaWiki category pages list member articles as plain <li><a href="/wiki/X"
+    title="Y">Z</a></li> entries (no ticker/ISIN -- category pages never carry
+    that), grouped alphabetically, with a "next page" link when there are more
+    than ~200 entries."""
+    entries = {}
+    for m in re.finditer(r'<li><a href="(/wiki/[^">]+)"[^>]*title="([^"]+)"[^>]*>', html):
+        href, title = m.group(1), m.group(2)
+        entries[title] = f"https://en.wikipedia.org{href}"
+
+    next_url = None
+    next_match = re.search(r'<a href="([^"]+)"[^>]*>next page</a>', html)
+    if next_match:
+        next_url = next_match.group(1).replace("&amp;", "&")
+        if next_url.startswith("/"):
+            next_url = f"https://en.wikipedia.org{next_url}"
+
+    return entries, next_url
+
+
+def fetch_wikipedia_delisted_companies(use_cache: bool = True, force_refresh: bool = False,
+                                        max_pages: int = 10) -> dict:
+    """Scrapes Wikipedia's 'Companies formerly listed on the London Stock
+    Exchange' category. Returns {company_name: wikipedia_url}.
+
+    NOT a ticker source -- category pages carry no ticker/ISIN data, and most
+    delisted companies have no fetchable price data via yfinance regardless.
+    This is a reference list for research (main.py's --list-delisted), not
+    something fed into --discover's ratio/Graham pipeline. It's also
+    inherently incomplete: only companies notable enough for a Wikipedia
+    article appear here -- nowhere near a full historical record of every
+    company ever delisted from the LSE.
+    """
+    if use_cache and not force_refresh:
+        cached = _read_json_cache(DELISTED_CACHE_PATH, DELISTED_CACHE_TTL_DAYS)
+        if cached is not None:
+            return cached
+
+    all_entries = {}
+    url = WIKI_DELISTED_CATEGORY_URL
+    pages_fetched = 0
+
+    while url and pages_fetched < max_pages:
+        print(f"Fetching Wikipedia 'formerly listed on the LSE' category, page {pages_fetched + 1}...")
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=15)
+            resp.raise_for_status()
+        except Exception as e:
+            print(f"  [warn] Failed to fetch {url}: {e}")
+            break
+
+        entries, next_url = _parse_wikipedia_category_page(resp.text)
+        all_entries.update(entries)
+        pages_fetched += 1
+
+        if next_url == url:
+            break  # safety net against a parsing bug causing an infinite loop
+        url = next_url
+        if url:
+            time.sleep(_REQUEST_DELAY_SECONDS)
+
+    if not all_entries:
+        stale = _read_json_cache(DELISTED_CACHE_PATH, DELISTED_CACHE_TTL_DAYS, ignore_ttl=True)
+        if stale:
+            print("Wikipedia fetch failed completely; using a previously cached list instead "
+                  "(may be out of date -- rerun with --list-delisted-refresh later).")
+            return stale
+        raise RuntimeError(
+            "Couldn't fetch the delisted-companies list from Wikipedia and no cached copy "
+            "exists. This is usually rate limiting, not a code problem -- wait a few minutes "
+            "and try again."
+        )
+
+    if use_cache:
+        _write_json_cache(DELISTED_CACHE_PATH, all_entries)
+
+    return all_entries

@@ -17,17 +17,22 @@ Usage:
     python main.py --dividends                      # full dividend payment history + summary columns
     python main.py --import-portfolio my_isa.csv --portfolio-name ISA
     python main.py --import-portfolio jan.csv feb.csv mar.csv --portfolio-name ISA
+    python main.py --import-portfolio --portfolio-name ISA   # scans BROKER_EXPORTS_DIR/ISA/
+    python main.py --import-portfolio                        # no name: imports every portfolio subfolder
+    python main.py --import-portfolio ~/Downloads/exports --portfolio-name ISA  # scans a specific folder
     python main.py --list-portfolios
+    python main.py --list-delisted                   # export Wikipedia's formerly-listed LSE companies
 """
 import argparse
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 from tabulate import tabulate
 
-from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS, asset_class_for
+from config import OUTPUT_DIR, DEFAULT_WATCHLIST_PATH, ASSET_CLASSES, ALL_INSTRUMENTS, asset_class_for, BROKER_EXPORTS_DIR
 from data.fetchers import get_watchlist_fundamentals
 import data.universe as universe
 import data.dividends as dividends
@@ -44,6 +49,28 @@ def load_watchlist(path) -> dict:
         data = json.load(f)
     tickers = data["watchlist"]
     return {t: ALL_INSTRUMENTS.get(t, t) for t in tickers}
+
+
+def resolve_csv_paths(paths: list, default_dir: Path) -> list:
+    """Expands a mix of file paths and directory paths into a flat list of
+    CSV file paths. An empty/missing `paths` falls back to scanning
+    `default_dir` (BROKER_EXPORTS_DIR, or --broker-exports-dir override)."""
+    if not paths:
+        paths = [str(default_dir)]
+
+    resolved = []
+    for raw in paths:
+        p = Path(raw)
+        if p.is_dir():
+            found = sorted(p.glob("*.csv"))
+            if not found:
+                print(f"  [warn] No CSV files found in directory: {p}")
+            resolved.extend(str(f) for f in found)
+        elif p.is_file():
+            resolved.append(str(p))
+        else:
+            print(f"  [warn] Path not found, skipping: {p}")
+    return resolved
 
 
 def add_missing_to_watchlist(portfolio_tickers: dict, watchlist_path: str) -> list:
@@ -106,16 +133,80 @@ def parse_args():
                          help="Fetch full dividend payment history for each instrument (falls back to FMP "
                               "if yfinance's coverage is thin and FMP_API_KEY is set), add summary columns, "
                               "and export the full payment history to output/")
-    parser.add_argument("--import-portfolio", nargs="+", metavar="CSV_PATH", default=None,
-                         help="Import one or more Freetrade transaction history CSV exports into a portfolio "
-                              "(duplicate rows across files are automatically skipped)")
+    parser.add_argument("--import-portfolio", nargs="*", metavar="PATH", default=None,
+                         help="Import Freetrade transaction history CSV export(s) into a portfolio. Accepts "
+                              "explicit file/directory paths, or no paths at all -- with --portfolio-name, "
+                              "scans <BROKER_EXPORTS_DIR>/<name>/ for CSVs; with neither, treats "
+                              "BROKER_EXPORTS_DIR as containing one subfolder per portfolio and imports all "
+                              "of them. Duplicate rows across files are automatically skipped")
+    parser.add_argument("--broker-exports-dir", default=None,
+                         help=f"Base directory for broker exports, one subfolder per portfolio "
+                              f"(default: BROKER_EXPORTS_DIR env var, currently {BROKER_EXPORTS_DIR}) -- "
+                              f"e.g. <this>/ISA/*.csv, <this>/GIA/*.csv")
     parser.add_argument("--portfolio-name", default=None,
-                         help="Name for the portfolio being imported (used to name its tables); "
-                              "defaults to the first CSV file's name")
+                         help="Name of the portfolio to import/target (also the subfolder name under "
+                              "--broker-exports-dir when no explicit path is given); omit entirely with "
+                              "--import-portfolio to batch-import every portfolio subfolder found")
     parser.add_argument("--list-portfolios", action="store_true",
                          help="List portfolios that have been imported so far, then exit")
+    parser.add_argument("--list-delisted", action="store_true",
+                         help="Export Wikipedia's list of companies formerly listed on the LSE (name + wiki "
+                              "link only -- no tickers or market data, and NOT fed into --discover/--graham, "
+                              "since delisted companies generally have no fetchable price data). Non-exhaustive: "
+                              "only companies notable enough for a Wikipedia article are included")
+    parser.add_argument("--list-delisted-refresh", action="store_true",
+                         help="With --list-delisted, force re-fetching from Wikipedia instead of using the "
+                              "local cache (~30 day TTL)")
     parser.add_argument("--no-save", action="store_true", help="Don't write a CSV snapshot to output/")
     return parser.parse_args()
+
+
+def import_and_process_portfolio(portfolio_name: str, csv_paths: list, args) -> None:
+    """Imports transaction CSVs for one portfolio, syncs the watchlist, fetches
+    fundamentals, saves ratios, and prints the result. Used both for a single
+    --portfolio-name import and for the batch (one-folder-per-portfolio) case."""
+    print(f"\n=== Portfolio: {portfolio_name} ===")
+    print(f"Importing {len(csv_paths)} file(s):")
+    for p in csv_paths:
+        print(f"  - {p}")
+
+    summary = portfolio.import_transactions(portfolio_name, csv_paths)
+    print(f"  {summary['rows_seen']} transaction rows read: "
+          f"{summary['rows_inserted']} new, "
+          f"{summary['rows_duplicate']} already present (skipped as duplicates).\n")
+
+    portfolio_tickers = portfolio.get_portfolio_tickers(portfolio_name)
+    print(f"{len(portfolio_tickers)} distinct tickers held in this portfolio's history.")
+
+    added = add_missing_to_watchlist(portfolio_tickers, args.watchlist)
+    if added:
+        print(f"Added {len(added)} new ticker(s) to {args.watchlist}: {', '.join(added)}")
+    else:
+        print(f"No new tickers to add to {args.watchlist} -- all already present.")
+
+    print(f"\nFetching fundamentals for {len(portfolio_tickers)} portfolio tickers...")
+    records = get_watchlist_fundamentals(portfolio_tickers, use_cache=not args.refresh)
+    port_df = build_dataframe(records)
+    port_df["asset_class"] = port_df["ticker"].apply(asset_class_for)
+
+    missing = port_df[port_df["name"].isna()]["ticker"].tolist() if "name" in port_df.columns else []
+    if missing:
+        print(f"Warning: no data returned for: {', '.join(missing)} (check ticker or data source availability)\n")
+
+    run_date = datetime.now().strftime("%Y-%m-%d")
+    ratio_records = []
+    for _, row in port_df.iterrows():
+        record = row.to_dict()
+        record["run_date"] = run_date
+        ratio_records.append(record)
+    portfolio.save_portfolio_ratios(portfolio_name, ratio_records)
+
+    ratios_table = portfolio.ratios_table_name(portfolio_name)
+    print(f"Saved ratios for {len(ratio_records)} companies to the '{ratios_table}' table "
+          f"in data/market_data.db.\n")
+
+    display_df = format_for_display(port_df)
+    print(tabulate(display_df, headers="keys", tablefmt="simple", showindex=False))
 
 
 def main():
@@ -131,47 +222,78 @@ def main():
             print("No portfolios imported yet. Use --import-portfolio to add one.")
         return
 
-    if args.import_portfolio:
-        portfolio_name = args.portfolio_name or Path(args.import_portfolio[0]).stem
-        print(f"Importing {len(args.import_portfolio)} file(s) into portfolio '{portfolio_name}'...")
+    if args.list_delisted:
+        print("Fetching Wikipedia's 'formerly listed on the LSE' category (names + links only -- "
+              "no tickers or market data)...")
+        delisted = universe.fetch_wikipedia_delisted_companies(
+            use_cache=not args.list_delisted_refresh, force_refresh=args.list_delisted_refresh
+        )
+        print(f"\nFound {len(delisted)} companies. This is NOT exhaustive -- only companies notable "
+              f"enough for a Wikipedia article are included, so treat this as a research starting "
+              f"point, not a complete historical record.\n")
 
-        summary = portfolio.import_transactions(portfolio_name, args.import_portfolio)
-        print(f"  {summary['rows_seen']} transaction rows read: "
-              f"{summary['rows_inserted']} new, "
-              f"{summary['rows_duplicate']} already present (skipped as duplicates).\n")
+        delisted_df = pd.DataFrame(
+            [{"name": name, "wikipedia_url": url} for name, url in sorted(delisted.items())]
+        )
 
-        portfolio_tickers = portfolio.get_portfolio_tickers(portfolio_name)
-        print(f"{len(portfolio_tickers)} distinct tickers held in this portfolio's history.")
-
-        added = add_missing_to_watchlist(portfolio_tickers, args.watchlist)
-        if added:
-            print(f"Added {len(added)} new ticker(s) to {args.watchlist}: {', '.join(added)}")
+        if args.no_save:
+            print(delisted_df.to_string(index=False))
         else:
-            print(f"No new tickers to add to {args.watchlist} -- all already present.")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_path = OUTPUT_DIR / f"delisted_companies_{timestamp}.csv"
+            delisted_df.to_csv(out_path, index=False)
+            print(f"Saved to {out_path}")
+        return
 
-        print(f"\nFetching fundamentals for {len(portfolio_tickers)} portfolio tickers...")
-        records = get_watchlist_fundamentals(portfolio_tickers, use_cache=not args.refresh)
-        port_df = build_dataframe(records)
-        port_df["asset_class"] = port_df["ticker"].apply(asset_class_for)
+    if args.import_portfolio is not None:
+        export_root = Path(args.broker_exports_dir) if args.broker_exports_dir else BROKER_EXPORTS_DIR
 
-        missing = port_df[port_df["name"].isna()]["ticker"].tolist() if "name" in port_df.columns else []
-        if missing:
-            print(f"Warning: no data returned for: {', '.join(missing)} (check ticker or data source availability)\n")
+        if args.import_portfolio:
+            # Explicit file(s) and/or folder(s) given -- single portfolio import.
+            csv_paths = resolve_csv_paths(args.import_portfolio, export_root)
+            if not csv_paths:
+                print(f"No CSV files found to import (looked in: {', '.join(args.import_portfolio)}).")
+                return
+            portfolio_name = args.portfolio_name or Path(args.import_portfolio[0]).stem
+            import_and_process_portfolio(portfolio_name, csv_paths, args)
 
-        run_date = datetime.now().strftime("%Y-%m-%d")
-        ratio_records = []
-        for _, row in port_df.iterrows():
-            record = row.to_dict()
-            record["run_date"] = run_date
-            ratio_records.append(record)
-        portfolio.save_portfolio_ratios(portfolio_name, ratio_records)
+        elif args.portfolio_name:
+            # No paths, but a name given -- scan <export_root>/<portfolio_name>/
+            portfolio_dir = export_root / args.portfolio_name
+            csv_paths = resolve_csv_paths([str(portfolio_dir)], export_root)
+            if not csv_paths:
+                print(f"No CSV files found for portfolio '{args.portfolio_name}' "
+                      f"(looked in: {portfolio_dir}).")
+                return
+            import_and_process_portfolio(args.portfolio_name, csv_paths, args)
 
-        ratios_table = portfolio.ratios_table_name(portfolio_name)
-        print(f"Saved ratios for {len(ratio_records)} companies to the '{ratios_table}' table "
-              f"in data/market_data.db.\n")
+        else:
+            # No paths, no name -- treat export_root as containing one
+            # subfolder per portfolio (BROKER_EXPORTS_DIR/<portfolio name>/)
+            # and import every one of them in a single run.
+            if not export_root.is_dir():
+                print(f"{export_root} doesn't exist. Set BROKER_EXPORTS_DIR in .env, pass "
+                      f"--broker-exports-dir, or give explicit file/folder paths.")
+                return
 
-        display_df = format_for_display(port_df)
-        print(tabulate(display_df, headers="keys", tablefmt="simple", showindex=False))
+            subdirs = sorted(p for p in export_root.iterdir() if p.is_dir())
+            if not subdirs:
+                example = export_root / "<portfolio name>"
+                print(f"No portfolio subfolders found in {export_root}. Expected a layout like "
+                      f"{example}{os.sep}*.csv -- or pass --portfolio-name to target one folder "
+                      f"directly, or explicit file paths.")
+                return
+
+            print(f"No --portfolio-name given -- found {len(subdirs)} portfolio folder(s) under "
+                  f"{export_root}, importing all of them: {', '.join(p.name for p in subdirs)}")
+
+            for subdir in subdirs:
+                csv_paths = resolve_csv_paths([str(subdir)], export_root)
+                if not csv_paths:
+                    print(f"\n=== Portfolio: {subdir.name} ===\n  [skip] no CSV files found in {subdir}")
+                    continue
+                import_and_process_portfolio(subdir.name, csv_paths, args)
+
         return
 
     if args.discover:

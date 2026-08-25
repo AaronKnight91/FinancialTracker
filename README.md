@@ -64,6 +64,7 @@ python main.py --asset-class company --graham --graham-only
 python main.py --discover              # scan the whole FTSE 100+250 for Graham passers
 python main.py --dividends              # full dividend payment history + summary columns
 python main.py --import-portfolio my_isa.csv --portfolio-name ISA  # import a broker export
+python main.py --list-delisted          # export Wikipedia's formerly-listed LSE companies
 ```
 
 Every run prints a comparison table and saves a full CSV snapshot to
@@ -149,6 +150,48 @@ of cases but isn't a verified lookup table. A handful of tickers may not
 resolve correctly; these will just show up as "no data returned" rather than
 break the run.
 
+## Companies formerly listed on the LSE (`--list-delisted`)
+
+```bash
+python main.py --list-delisted                # export to output/delisted_companies_<timestamp>.csv
+python main.py --list-delisted --no-save      # print to console instead
+python main.py --list-delisted --list-delisted-refresh  # force re-fetch, ignoring the ~30 day cache
+```
+
+Scrapes Wikipedia's "Companies formerly listed on the London Stock Exchange"
+category and exports `name, wikipedia_url` for each one.
+
+**This is deliberately a separate, standalone feature from `--discover` and
+`--graham`, not another `--discover-source` option.** Category pages on
+Wikipedia carry no ticker or ISIN data at all — just article titles — and
+even if they did, most companies delisted years or decades ago have no
+fetchable price data via yfinance anyway. Piping this into the ratio/Graham
+pipeline would produce a table that looks like real market data but mostly
+isn't. So `--list-delisted` just exports names and links for research, and
+stops there.
+
+**On completeness — there genuinely isn't a free comprehensive answer here.**
+No free source (this one included) gives you every company ever traded on
+the LSE, including obscure delisted ones:
+- Wikipedia's category only includes companies notable enough to have an
+  article — a few hundred, not the many thousands that have delisted since
+  the LSE's founding in 1801.
+- The FCA maintains the live Official List and publishes individual removal
+  notices as they happen, but no single downloadable historical archive of
+  every removal.
+- Companies House's free bulk data covers currently active UK companies
+  (plus a ~6-year rolling window of dissolved ones) — and that's company
+  *registration* status, not LSE *listing* status; a company can delist
+  from the LSE while remaining a registered (private) company for years.
+
+A genuinely complete, survivorship-bias-free history is really the domain
+of paid institutional data: Refinitiv/LSEG Datastream (which has an
+"include dead securities" option built for exactly this), Bloomberg, Orbis,
+or — the standard academic reference for UK equities specifically — the
+London Share Price Database (LSPD) at London Business School, which goes
+back to the 1950s. If you need rigor rather than a research starting point,
+that's where to look.
+
 ## Full dividend payment history (`--dividends`)
 
 ```bash
@@ -198,8 +241,58 @@ currently supports **Freetrade's** CSV export format.
 python main.py --import-portfolio freetrade_export.csv --portfolio-name ISA
 python main.py --import-portfolio jan.csv feb.csv mar.csv --portfolio-name ISA  # several files at once
 python main.py --import-portfolio my_gia_export.csv --portfolio-name GIA        # a separate portfolio
+python main.py --import-portfolio ~/Downloads/freetrade --portfolio-name ISA    # a folder: imports every CSV inside
+python main.py --import-portfolio --portfolio-name ISA                          # scans BROKER_EXPORTS_DIR/ISA/
+python main.py --import-portfolio                                                # no name: imports every portfolio subfolder
 python main.py --list-portfolios                                                 # see what's been imported
 ```
+
+### Setting a default export folder (one subfolder per portfolio)
+
+Rather than typing a file path every time, point `BROKER_EXPORTS_DIR` at a
+base folder laid out with one subfolder per portfolio:
+
+```
+C:\Users\yourname\Data\Financials\raw\ISA\freetrade_export.csv
+C:\Users\yourname\Data\Financials\raw\GIA\freetrade_export.csv
+```
+
+```bash
+# in .env -- this is the BASE folder ("raw"), not including the portfolio name
+BROKER_EXPORTS_DIR=C:\Users\yourname\Data\Financials\raw
+```
+
+Then:
+
+```bash
+python main.py --import-portfolio --portfolio-name ISA
+# -> scans C:\Users\yourname\Data\Financials\raw\ISA\*.csv
+
+python main.py --import-portfolio
+# -> no name given: finds every subfolder under BROKER_EXPORTS_DIR
+#    (ISA, GIA, ...) and imports each one as its own portfolio in a
+#    single run -- handy for a periodic "import whatever's new" pass
+```
+
+Or override the base folder for a single run without touching `.env`:
+
+```bash
+python main.py --import-portfolio --portfolio-name ISA --broker-exports-dir D:\OtherExports
+```
+
+With no `BROKER_EXPORTS_DIR` set, it defaults to `./broker_exports` inside
+the project (created automatically) — so `./broker_exports/ISA/*.csv` works
+out of the box with no configuration. You can also still point
+`--import-portfolio` directly at a specific file, or any single folder
+(not necessarily under the configured base), and it behaves the same as
+before — the base-folder-with-subfolders resolution only kicks in when you
+give it a portfolio name (or nothing at all) with no explicit path.
+
+**This folder holds real financial data, so it's excluded from git** —
+`.gitignore` covers `broker_exports/*.csv` specifically (the folder itself
+stays tracked via a `.gitkeep`, so the project ships ready to use). If you
+set `BROKER_EXPORTS_DIR` to somewhere outside the project entirely (as in
+the Windows example above), that's never a git concern regardless.
 
 Each run:
 
@@ -255,6 +348,7 @@ lse_analyzer/
 ├── config.py                # settings, env vars, and the asset-class ticker lists
 ├── watchlist.json            # your list of tickers to track by default
 ├── run_monthly.sh            # cron wrapper for scheduled (e.g. Pi) runs
+├── broker_exports/            # default drop folder for broker CSVs (see BROKER_EXPORTS_DIR)
 ├── data/
 │   ├── cache.py             # short-term TTL cache (avoids re-hitting APIs same-day)
 │   ├── storage.py           # long-term SQLite store: price history, dated snapshots, dividends

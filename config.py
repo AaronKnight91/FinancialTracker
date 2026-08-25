@@ -35,6 +35,18 @@ FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 # --- Watchlist (used by default unless --asset-class or --watchlist overrides it) ---
 DEFAULT_WATCHLIST_PATH = BASE_DIR / "watchlist.json"
 
+# --- Broker export files (for --import-portfolio) ---
+# Base directory holding one subfolder per portfolio, e.g.:
+#   BROKER_EXPORTS_DIR/ISA/*.csv
+#   BROKER_EXPORTS_DIR/GIA/*.csv
+# `--import-portfolio --portfolio-name ISA` scans BROKER_EXPORTS_DIR/ISA/ for
+# every CSV in it; `--import-portfolio` with no name at all imports every
+# subfolder found (batch mode). Override in .env or per-run with
+# --broker-exports-dir. Contains real financial data, so it's gitignored.
+_broker_exports_env = os.getenv("BROKER_EXPORTS_DIR", "").strip()
+BROKER_EXPORTS_DIR = Path(_broker_exports_env) if _broker_exports_env else (BASE_DIR / "broker_exports")
+BROKER_EXPORTS_DIR.mkdir(exist_ok=True)
+
 # --- Asset universe ---
 # Yahoo Finance tickers for the London Stock Exchange use a ".L" suffix.
 # Individual UK Gilts (government bonds) don't trade on retail-accessible

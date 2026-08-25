@@ -2,11 +2,14 @@
 cache.db
 data/market_data.db
 data/universe_cache.json
+data/delisted_cache.json
 output/
 reports/
 
-# --- Secrets ---
+# --- Personal financial data (never commit) ---
 .env
+broker_exports/*.csv
+broker_exports/*.CSV
 
 # --- Python ---
 __pycache__/
